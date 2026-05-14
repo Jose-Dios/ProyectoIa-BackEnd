@@ -1,0 +1,28 @@
+Analiza el siguiente código considerando estas reglas de calidad de software.
+
+Reglas de calidad:
+- No usar campos públicos cuando sea posible.
+- Usar nombres de variables descriptivos.
+- Evitar clases con múltiples responsabilidades.
+- Aplicar principios SOLID cuando sea posible.
+- Evitar duplicación de código (DRY).
+
+Reglas de estructura de la empresa:
+- Preferir estructuras orientadas a objetos cuando sea posible.
+- Usar clases para organizar la lógica.
+- Usar la siguiente convención de formato:
+
+export class NombreClase {
+  metodo() {
+
+  }
+}
+
+- Las llaves deben ir en bloques claros como en el ejemplo anterior.
+- Mantener indentación consistente.
+
+Para cada problema encontrado:
+1. Problema detectado
+2. Explicación
+3. Sugerencia de mejora
+4. Si es posible, mostrar una versión refactorizada siguiendo la estructura de clases mostrada. 

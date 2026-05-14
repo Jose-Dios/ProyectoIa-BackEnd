@@ -1,0 +1,182 @@
+# 🚀 Proyecto IA - Análisis y Refactorización de Código
+
+Sistema backend que permite analizar proyectos de software utilizando un modelo de inteligencia artificial local mediante Ollama.
+
+---
+
+## Requisitos
+
+Antes de ejecutar el proyecto, asegúrate de tener instalado:
+
+* Node.js
+* Docker
+* Ollama
+
+---
+
+## Configuración
+
+1. Clonar el repositorio:
+
+```bash
+git clone <URL_DEL_REPOSITORIO>
+cd proyecto_ia
+```
+
+2. Instalar dependencias:
+
+```bash
+npm install
+```
+
+3. Crear archivo `.env` basado en `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+---
+
+## Configuración de IA (Ollama)
+
+Iniciar el servidor de Ollama:
+
+```bash
+ollama serve
+```
+
+Descargar y ejecutar el modelo (si no lo tienes):
+
+```bash
+ollama run qwen2.5-coder:3b
+```
+
+> Puedes cambiar el modelo en el archivo `.env` sin modificar el código.
+
+---
+
+## Base de datos (MongoDB con Docker)
+
+Este proyecto utiliza MongoDB ejecutándose en contenedores Docker junto con una interfaz web para su gestión.
+
+### Levantar MongoDB + interfaz web
+
+Ejecuta:
+
+```bash
+docker-compose up -d
+```
+
+---
+
+### Configuración recomendada (`docker-compose.yml`)
+
+Asegúrate de tener un archivo `docker-compose.yml` como este:
+
+```yaml
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: mongo_db
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+    volumes:
+      - mongo_data:/data/db
+
+  mongo-express:
+    image: mongo-express:1.0.0
+    container_name: mongo_express
+    restart: always
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
+      ME_CONFIG_MONGODB_SERVER: mongo
+
+volumes:
+  mongo_data:
+```
+
+---
+
+### Acceso a la interfaz web
+
+Una vez levantados los contenedores, puedes acceder desde tu navegador a:
+
+```text
+http://localhost:8081
+```
+
+---
+
+### Credenciales
+
+* Usuario: `admin`
+* Contraseña: `admin123`
+
+---
+
+### Nota importante
+
+En tu archivo `.env`, la conexión a MongoDB debería verse así:
+
+```env
+MONGO_URI=mongodb://admin:admin123@localhost:27017/proyecto_ia?authSource=admin
+```
+
+Esto permite que tu backend se conecte correctamente usando autenticación.
+
+
+---
+
+## Ejecución del proyecto
+
+Iniciar el servidor en modo desarrollo:
+
+```bash
+npm run dev
+```
+
+El backend estará disponible en:
+
+```
+http://localhost:3000
+```
+
+---
+
+## Características
+
+* Análisis de código fuente
+* Detección de duplicación
+* Sugerencias de refactorización
+* Uso de IA local (sin APIs externas)
+* Configuración dinámica mediante `.env`
+* Arquitectura modular (Controller / Service / Utils)
+
+---
+
+## Personalización
+
+Puedes cambiar fácilmente el modelo de IA modificando:
+
+```env
+MODEL=qwen2.5-coder:3b
+```
+
+Esto permite usar otros modelos compatibles con Ollama sin cambiar el código fuente.
+
+---
+
+## Nota
+
+El sistema está diseñado para funcionar completamente en local, sin depender de servicios externos, lo que permite mayor control, privacidad y reducción de costos.
+
+---
