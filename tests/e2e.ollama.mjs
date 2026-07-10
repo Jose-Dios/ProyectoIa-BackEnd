@@ -92,7 +92,18 @@ if (respuesta.status !== 200) {
   process.exit(1);
 }
 
-const { validacion, metricasAntes, metricasDespues, comparacion, zip, modelo } = cuerpo;
+const { validacion, metricasAntes, metricasDespues, comparacion, interpretacion, resumen, zip, modelo } = cuerpo;
+
+// El prompt ya no pide porcentajes: comprobamos que el modelo no los invente.
+const porcentajesInventados = resumen.match(/(Arquitectura|Complejidad|Organizaci[oó]n|Duplicaci[oó]n[^:\n]*|Buenas pr[aá]cticas):\s*\d+\s*%/gi);
+
+console.log(
+  porcentajesInventados
+    ? `AVISO: el modelo inventó porcentajes pese al prompt: ${porcentajesInventados.join(" | ")}`
+    : "OK: el resumen no contiene porcentajes autoasignados por la IA"
+);
+console.log(`Interpretacion (derivada de la medicion): ${interpretacion}`);
+console.log(`¿Se cayo al resumen por defecto?: ${resumen.includes("No disponible.") ? "SI" : "no"}`);
 
 console.log("=".repeat(64));
 console.log(`VALIDACION SINTACTICA (modelo: ${modelo})`);

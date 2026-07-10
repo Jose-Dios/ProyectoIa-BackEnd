@@ -184,24 +184,12 @@ Calidad general: (Baja, Media o Alta)
 Mantenibilidad: (Baja, Media o Alta)
 Escalabilidad: (Baja, Media o Alta)
 
-## Métricas de calidad del software
+## Recomendaciones prioritarias
 
 IMPORTANTE:
-- Los valores representan NIVEL DE CALIDAD, no cantidad de mejora
-- 0% = muy mala calidad (muchos problemas)
-- 100% = excelente calidad (sin problemas)
-- Basa los valores en la severidad detectada anteriormente
-
-Arquitectura: X%
-Duplicación de código: X%
-Complejidad: X%
-Organización: X%
-Buenas prácticas: X%
-
-## Impacto de la refactorización
-(Significativa, Moderada o Baja)
-
-## Recomendaciones prioritarias
+- NO inventes porcentajes ni puntuaciones numéricas de calidad.
+- La cuantificación la calcula el sistema midiendo el código; tu tarea es el
+  diagnóstico cualitativo: qué está mal, dónde, y cómo arreglarlo.
 `;
 
   return llamarIA({ prompt });

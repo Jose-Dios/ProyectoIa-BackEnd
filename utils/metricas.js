@@ -1,9 +1,11 @@
-// Las métricas de calidad las produce la IA en el resumen; aquí solo se
-// normaliza el formato del texto y se extraen los porcentajes.
+// Normalización del reporte CUALITATIVO que devuelve la IA.
 //
-// Nota: `calcularMetricasIniciales`, `extraerMetricas`, `normalizarMetricas`,
-// `calcularMejora` y `calcularMejoraPorcentaje` se eliminaron por no estar en
-// uso; siguen disponibles en el historial de git si hicieran falta.
+// Este módulo ya no extrae porcentajes de calidad. Antes se leían del propio
+// texto de la IA (`Arquitectura: 60%`), es decir, el sistema evaluado se ponía
+// su propia nota: no era reproducible ni verificable. La cuantificación vive
+// ahora en `metricasCodigo.js`, que mide el código con reglas deterministas.
+//
+// La IA conserva lo que sí sabe hacer: diagnosticar qué está mal y dónde.
 
 const SECCIONES = [
   { titulo: "Arquitectura", patron: /#+\s*arquitectura/gi },
@@ -12,19 +14,6 @@ const SECCIONES = [
   { titulo: "Organización", patron: /#+\s*organizaci[oó]n/gi },
   { titulo: "Buenas prácticas", patron: /#+\s*buenas pr[aá]cticas/gi },
 ];
-
-export function interpretarMejora(metricas) {
-  const valores = Object.values(metricas);
-
-  if (valores.length === 0) return "Sin datos";
-
-  const promedio = valores.reduce((a, b) => a + b, 0) / valores.length;
-
-  if (promedio >= 70) return "Alta calidad";
-  if (promedio >= 40) return "Calidad media";
-
-  return "Baja calidad";
-}
 
 export function validarFormato(resumen) {
   return SECCIONES.every(({ patron }) => new RegExp(patron.source, "i").test(resumen));
@@ -37,22 +26,6 @@ export function normalizarResumen(texto) {
     (acumulado, { titulo, patron }) => acumulado.replace(patron, `### ${titulo}`),
     texto.replace(/severidad/gi, "SEVERIDAD")
   );
-}
-
-export function extraerMetricasFinales(resumen) {
-  const leerPorcentaje = (regex) => {
-    const coincidencia = resumen.match(regex);
-
-    return coincidencia ? Number(coincidencia[1]) : 0;
-  };
-
-  return {
-    arquitectura: leerPorcentaje(/Arquitectura:\s*(\d+(?:\.\d+)?)\s*%/i),
-    duplicacion: leerPorcentaje(/Duplicaci[oó]n[^:\n]*:\s*(\d+(?:\.\d+)?)\s*%/i),
-    complejidad: leerPorcentaje(/Complejidad:\s*(\d+(?:\.\d+)?)\s*%/i),
-    organizacion: leerPorcentaje(/Organizaci[oó]n:\s*(\d+(?:\.\d+)?)\s*%/i),
-    buenasPracticas: leerPorcentaje(/Buenas pr[aá]cticas:\s*(\d+(?:\.\d+)?)\s*%/i),
-  };
 }
 
 export function iniciarCronometro() {

@@ -137,6 +137,11 @@ const MENOR_ES_MEJOR = [
   "malasPracticas",
 ];
 
+// `lineasCodigo` se reporta pero NO entra en el promedio: un refactor correcto
+// suele añadir líneas al expandir `if (x) { log; return; }` a varias líneas.
+// Penalizarlo castigaría el buen formateo y daría "empeoró" a refactors buenos.
+const METRICAS_DE_CALIDAD = MENOR_ES_MEJOR.filter((clave) => clave !== "lineasCodigo");
+
 export function compararMetricas(antes, despues) {
   const comparacion = {};
 
@@ -160,10 +165,24 @@ export function compararMetricas(antes, despues) {
   };
 
   const promedio =
-    MENOR_ES_MEJOR.reduce((suma, clave) => suma + comparacion[clave].mejoraPorcentual, 0) /
-    MENOR_ES_MEJOR.length;
+    METRICAS_DE_CALIDAD.reduce((suma, clave) => suma + comparacion[clave].mejoraPorcentual, 0) /
+    METRICAS_DE_CALIDAD.length;
 
   comparacion.mejoraPromedio = redondear(promedio);
 
   return comparacion;
+}
+
+// Veredicto derivado de la MEDICIÓN del código, no de la opinión del modelo.
+// Antes esta interpretación se calculaba sobre los porcentajes que la propia IA
+// se autoasignaba en el reporte, lo que la hacía imposible de verificar.
+export function interpretarMejora(comparacion) {
+  const mejora = comparacion.mejoraPromedio;
+
+  if (mejora >= 30) return "Mejora significativa";
+  if (mejora >= 10) return "Mejora moderada";
+  if (mejora > 0) return "Mejora leve";
+  if (mejora === 0) return "Sin cambios medibles";
+
+  return "Sin mejora medible";
 }

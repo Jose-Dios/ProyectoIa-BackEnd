@@ -141,23 +141,39 @@ truncarse: un archivo cortado a la mitad es peor que uno sin refactorizar.
 
 ---
 
-## Métricas: dos fuentes distintas
+## Métricas: quién mide qué
 
-El proyecto reporta métricas de **dos orígenes que no deben confundirse**:
+El reparto de responsabilidades es explícito: **la IA diagnostica, el sistema
+mide.**
 
-* **`metricas` / `interpretacion`** — Es la IA autoevaluándose en el reporte.
-  Sirve como narrativa legible, pero no es una medición: no es reproducible ni
-  verificable.
+* **`resumen`** — Diagnóstico *cualitativo* de la IA: severidad por categoría,
+  archivos afectados, descripción y recomendaciones. Es donde un modelo de
+  lenguaje aporta valor real y ningún regex llega.
 
-* **`metricasAntes` / `metricasDespues` / `comparacion`** — Se calculan con
-  reglas deterministas sobre el código, antes y después de refactorizar:
-  líneas de código, complejidad ciclomática (McCabe), porcentaje de duplicación
-  (bloques de 5 líneas repetidos), densidad de comentarios y malas prácticas
-  (`var`, `==`, `console.log`).
+* **`metricasAntes` / `metricasDespues` / `comparacion` / `interpretacion`** —
+  Medición *cuantitativa*, calculada con reglas deterministas sobre el código
+  antes y después de refactorizar: líneas de código, complejidad ciclomática
+  (McCabe), porcentaje de duplicación (bloques de 5 líneas repetidos), densidad
+  de comentarios y malas prácticas (`var`, `==`, `console.log`).
 
-Solo las segundas permiten afirmar si hubo mejora. Son heurísticas léxicas, no
-análisis del AST: cuentan tokens sobre el texto, así que una palabra clave
-dentro de una cadena de texto puede contarse.
+### Por qué la IA ya no se pone nota
+
+Versiones anteriores pedían al modelo que rellenara `Arquitectura: X%`,
+`Complejidad: X%`, etc., y esos números se extraían del texto con un regex. Era
+el sistema evaluado poniéndose su propia calificación: no reproducible, no
+verificable, y distinto en cada modelo. Peor aún, si el modelo no respetaba el
+formato saltaba un *fallback* que ponía **todo a 0%**, dictaminando "Baja
+calidad" sobre proyectos que nadie había medido.
+
+Esos porcentajes se eliminaron. El prompt ahora prohíbe explícitamente inventar
+puntuaciones, e `interpretacion` se deriva de `comparacion.mejoraPromedio`.
+
+`lineasCodigo` se reporta pero **no entra en el promedio**: un refactor correcto
+suele añadir líneas al expandir `if (x) { log; return; }`, y penalizarlo
+castigaría el buen formateo.
+
+Las métricas son heurísticas léxicas, no análisis del AST: cuentan tokens sobre
+el texto, así que una palabra clave dentro de una cadena puede contarse.
 
 ---
 

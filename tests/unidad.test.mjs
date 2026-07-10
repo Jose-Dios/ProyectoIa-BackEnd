@@ -10,9 +10,9 @@ import {
   CARPETA_PUBLICA,
 } from "../utils/crearZip.js";
 import { validarSintaxis } from "../services/validarCodigo.js";
-import { calcularMetricasCodigo, compararMetricas } from "../utils/metricasCodigo.js";
+import { calcularMetricasCodigo, compararMetricas, interpretarMejora } from "../utils/metricasCodigo.js";
 import { prioridadArchivo } from "../utils/prioridadArchivo.js";
-import { normalizarResumen, validarFormato, extraerMetricasFinales } from "../utils/metricas.js";
+import { normalizarResumen, validarFormato } from "../utils/metricas.js";
 
 // aiService.js carga config/env.js al importarse, que exige estas variables.
 // Se importa de forma dinámica porque los `import` estáticos se evalúan antes
@@ -225,7 +225,7 @@ ok("duplicacion detectada entre archivos identicos", dup.porcentajeDuplicacion =
 const p = prioridadArchivo({ contenido: "notify(); format();\n" });
 ok("prioridadArchivo no cuenta 'if' dentro de 'notify'", p === 2, `prioridad=${p}`);
 
-// ---------- 5. Metricas del resumen IA ----------
+// ---------- 5. Normalizacion del reporte cualitativo de la IA ----------
 const resumenIA = normalizarResumen(`
 ## arquitectura
 SEVERIDAD: Alta
@@ -233,15 +233,31 @@ SEVERIDAD: Alta
 ## complejidad
 ## organizacion
 ## Buenas practicas
-Arquitectura: 65%
-Duplicación de código: 40%
-Complejidad: 55%
-Organización: 70%
-Buenas prácticas: 80%
 `);
 ok("validarFormato acepta encabezados sin tilde", validarFormato(resumenIA));
-const met = extraerMetricasFinales(resumenIA);
-ok("extraerMetricasFinales lee los 5 porcentajes", met.arquitectura === 65 && met.duplicacion === 40 && met.buenasPracticas === 80);
+
+// ---------- 6. La interpretacion sale de la MEDICION, no de la IA ----------
+// Refactor bueno: menos complejidad, menos duplicacion, menos malas practicas,
+// pero MAS lineas (el buen formateo expande el codigo). No debe salir negativo.
+const compBueno = compararMetricas(
+  { lineasCodigo: 10, complejidadTotal: 20, complejidadPromedioPorFuncion: 4, porcentajeDuplicacion: 50, malasPracticas: 10, densidadComentarios: 0 },
+  { lineasCodigo: 30, complejidadTotal: 10, complejidadPromedioPorFuncion: 2, porcentajeDuplicacion: 25, malasPracticas: 0, densidadComentarios: 20 }
+);
+ok("lineasCodigo se reporta en la comparacion", compBueno.lineasCodigo.antes === 10 && compBueno.lineasCodigo.despues === 30);
+ok("lineasCodigo NO penaliza el promedio (formateo != empeorar)", compBueno.mejoraPromedio === 62.5, `promedio=${compBueno.mejoraPromedio}`);
+ok("un refactor bueno se interpreta como mejora significativa", interpretarMejora(compBueno) === "Mejora significativa");
+
+const compNulo = compararMetricas(
+  { lineasCodigo: 10, complejidadTotal: 10, complejidadPromedioPorFuncion: 2, porcentajeDuplicacion: 0, malasPracticas: 0, densidadComentarios: 0 },
+  { lineasCodigo: 10, complejidadTotal: 10, complejidadPromedioPorFuncion: 2, porcentajeDuplicacion: 0, malasPracticas: 0, densidadComentarios: 0 }
+);
+ok("sin cambios -> 'Sin cambios medibles'", interpretarMejora(compNulo) === "Sin cambios medibles");
+
+const compMalo = compararMetricas(
+  { lineasCodigo: 10, complejidadTotal: 10, complejidadPromedioPorFuncion: 2, porcentajeDuplicacion: 0, malasPracticas: 2, densidadComentarios: 0 },
+  { lineasCodigo: 10, complejidadTotal: 20, complejidadPromedioPorFuncion: 5, porcentajeDuplicacion: 0, malasPracticas: 8, densidadComentarios: 0 }
+);
+ok("un refactor que empeora -> 'Sin mejora medible'", interpretarMejora(compMalo) === "Sin mejora medible");
 
 console.log(fallos === 0 ? "\nTODO PASA" : `\n${fallos} FALLOS`);
 process.exit(fallos === 0 ? 0 : 1);

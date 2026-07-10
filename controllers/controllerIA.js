@@ -6,7 +6,7 @@ import {
   refactorizarProyecto,
   ESTADO,
 } from "../services/aiService.js";
-import { calcularMetricasCodigo, compararMetricas } from "../utils/metricasCodigo.js";
+import { calcularMetricasCodigo, compararMetricas, interpretarMejora } from "../utils/metricasCodigo.js";
 import {
   crearEspacioTrabajo,
   guardarArchivosRefactorizados,
@@ -20,8 +20,6 @@ import { eliminarDuplicados } from "../utils/detectarDuplicados.js";
 import {
   validarFormato,
   normalizarResumen,
-  interpretarMejora,
-  extraerMetricasFinales,
   iniciarCronometro,
   finalizarCronometro,
 } from "../utils/metricas.js";
@@ -30,34 +28,34 @@ import { config } from "../config/env.js";
 
 const CARPETAS_IGNORADAS = ["node_modules", ".git", "dist", "build", "coverage"];
 
+// Se usa cuando el modelo no respeta el formato ni tras el reintento. No
+// afirma nada sobre el proyecto: dice que el diagnóstico cualitativo falló.
+// Las métricas objetivas se calculan igual, así que el análisis sigue teniendo
+// valor aunque este texto no se haya podido generar.
 const RESUMEN_POR_DEFECTO = `# REPORTE DE CALIDAD DEL SOFTWARE
+
+El modelo no generó un diagnóstico con el formato esperado, así que no hay
+análisis cualitativo disponible para este proyecto.
+
+Las métricas medidas sobre el código (complejidad, duplicación, malas prácticas)
+sí son válidas: se calculan sin intervención del modelo.
 
 ## Problemas detectados
 
 ### Arquitectura
-SEVERIDAD: Baja
+No disponible.
 
 ### Duplicación de Código
-SEVERIDAD: Baja
+No disponible.
 
 ### Complejidad
-SEVERIDAD: Baja
+No disponible.
 
 ### Organización
-SEVERIDAD: Baja
+No disponible.
 
 ### Buenas prácticas
-SEVERIDAD: Baja
-
-## Métricas de calidad del software
-
-No fue posible analizar el proyecto con el formato esperado.
-
-Arquitectura: 0%
-Duplicación de código: 0%
-Complejidad: 0%
-Organización: 0%
-Buenas prácticas: 0%
+No disponible.
 `;
 
 // Cada controlador recibe `repo`: la implementación concreta (MongoDB o
@@ -232,11 +230,6 @@ export async function analizarProyectoIA(req, res, repo) {
     resumen = RESUMEN_POR_DEFECTO;
   }
 
-  // Evaluación de la IA sobre sí misma: útil como narrativa, pero no es una
-  // medición. Se guarda por separado de las métricas objetivas.
-  const metricas = extraerMetricasFinales(resumen);
-  const interpretacion = interpretarMejora(metricas);
-
   const espacio = crearEspacioTrabajo();
 
   let nombreZip;
@@ -263,6 +256,10 @@ export async function analizarProyectoIA(req, res, repo) {
   );
 
   const comparacion = compararMetricas(metricasAntes, metricasDespues);
+
+  // El veredicto sale de la medición del código, no de la opinión del modelo.
+  const interpretacion = interpretarMejora(comparacion);
+
   const validacion = resumirValidacion(refactorizados);
 
   const zip = `${config.urlPublica}/refactorizado/${nombreZip}`;
@@ -272,16 +269,15 @@ export async function analizarProyectoIA(req, res, repo) {
 
   const documento = {
     tipo: "analisis_proyecto",
+    // Diagnóstico cualitativo de la IA (sin puntuaciones inventadas).
     resumen,
     lenguaje,
     fecha: new Date(),
-    // Autoevaluación del modelo (subjetiva).
-    metricas,
-    interpretacion,
-    // Medición determinista sobre el código (objetiva).
+    // Medición determinista sobre el código, y veredicto derivado de ella.
     metricasAntes,
     metricasDespues,
     comparacion,
+    interpretacion,
     validacion,
     modelo: config.ollama.modelo,
     tiempoAnalisis,
@@ -299,11 +295,10 @@ export async function analizarProyectoIA(req, res, repo) {
   res.json({
     archivos: analisisArchivos,
     resumen,
-    metricas,
-    interpretacion,
     metricasAntes,
     metricasDespues,
     comparacion,
+    interpretacion,
     validacion,
     modelo: config.ollama.modelo,
     zip,
