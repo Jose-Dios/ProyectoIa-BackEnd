@@ -1,359 +1,125 @@
-import axios from "axios";
 import fs from "fs";
-import "dotenv/config";
+import path from "path";
+import { fileURLToPath } from "url";
 import { llamarIA } from "./aiControl.js";
+import { validarSintaxis } from "./validarCodigo.js";
+import { validarContrato } from "./validarContrato.js";
+import { config } from "../config/env.js";
 
-//Aqui se realiza las conecciones con el modelo IA
-// const OLLAMA_URL = "http://localhost:11434/api/generate";
-// const OLLAMA_URL = "http://localhost:11434/api/chat";
-// const OLLAMA_URL = process.env.OLLAMA;
-// const MODEL = process.env.MODELO; 
-// Cargo reglas al iniciar el
-const reglas = fs.readFileSync("reglas.txt", "utf-8");
+const directorioActual = path.dirname(fileURLToPath(import.meta.url));
 
-//Esta funcion es para analizar los archivos de 3 en 3
-function agruparArchivos(archivos, tamañoGrupo = 3) {
+// Ruta anclada al módulo, no al directorio desde el que se lanza `node`.
+const reglas = fs.readFileSync(path.join(directorioActual, "..", "reglas.txt"), "utf-8");
 
+// Los modelos envuelven el código en bloques markdown pese a pedirles lo
+// contrario, y además lo rodean de prosa ("A continuación se presenta...",
+// "En este refactorizado se ha..."). Sin extraer el bloque, esa prosa acaba
+// dentro de los .js del ZIP y el archivo no compila.
+//
+// No basta con comprobar si la respuesta ENTERA es un bloque: hay que buscar
+// el bloque dentro del texto.
+export function limpiarBloqueDeCodigo(texto) {
+  const contenido = texto.trim();
+
+  const bloques = [...contenido.matchAll(/```[a-zA-Z]*\s*\n([\s\S]*?)```/g)].map((m) => m[1]);
+
+  if (bloques.length > 0) {
+    // Si el modelo emite varios bloques (código + ejemplo de uso), el archivo
+    // refactorizado es casi siempre el más largo.
+    return bloques.reduce((mayor, actual) => (actual.length > mayor.length ? actual : mayor)).trim();
+  }
+
+  // Bloque abierto pero nunca cerrado: ocurre cuando el modelo agota su límite
+  // de tokens a mitad de archivo. Nos quedamos con todo lo que sigue al fence.
+  const aperturaSinCierre = contenido.match(/```[a-zA-Z]*\s*\n([\s\S]*)$/);
+
+  if (aperturaSinCierre) return aperturaSinCierre[1].trim();
+
+  return contenido;
+}
+
+function agruparArchivos(archivos, tamanioGrupo = config.analisis.tamanioGrupo) {
   const grupos = [];
 
-  for (let i = 0; i < archivos.length; i += tamañoGrupo) {
-    grupos.push(archivos.slice(i, i + tamañoGrupo));
+  for (let i = 0; i < archivos.length; i += tamanioGrupo) {
+    grupos.push(archivos.slice(i, i + tamanioGrupo));
   }
 
   return grupos;
-
 }
 
-//Se obtiene el codigo y lenguaje para su analisis, aqui entra los fragmentos de codigo
 export async function analizarCodigo({ codigo, lenguaje }) {
   const prompt = `
-    Eres un revisor de código para el proyecto de una empresa.
-    Aplica estas reglas de buenas prácticas:
-    ${reglas}
+Eres un revisor de código para el proyecto de una empresa.
+Aplica estas reglas de buenas prácticas:
+${reglas}
 
-    Lenguaje: ${lenguaje}
+Lenguaje: ${lenguaje}
 
-    Código:
-    ${codigo}
+Código:
+${codigo}
 
-    Devuelve:
-    1) Problemas detectados
-    2) Sugerencias
-    3) Versión refactorizada del código
-    `;
+Devuelve:
+1) Problemas detectados
+2) Sugerencias
+3) Versión refactorizada del código
+`;
 
-      // const response = await axios.post(OLLAMA_URL, {
-      //   model: MODEL,
-      //   prompt,
-      //   stream: false
-      // });
-
-  // const response = await axios.post(
-  //   OLLAMA_URL,
-  //   {
-  //     model: MODEL,
-  //     messages: [
-  //       {
-  //         role: "user",
-  //         content: prompt
-  //       }
-  //     ],
-  //     stream: false
-  //   }
-  // );
-
-  // // return response.data.response;
-  // return response.data.message.content;
-
-  return await llamarIA({prompt});
+  return llamarIA({ prompt });
 }
 
-//Llama al modelo IA para generar respuesta de asistente experto en programación, limitandose a los ultimos 8 mensajes y el rol del sistema
 export async function chatGeneral({ mensajes }) {
+  // Descartamos los `system` almacenados para no acumular instrucciones
+  // duplicadas cada vez que se reanuda una conversación.
+  const historial = mensajes.filter((m) => m.role !== "system").slice(-8);
 
-  const mensajesRecientes = [
-    {
-      role: "system",
-      content: "Eres un asistente experto en programación, revisión y refactorización de código."
-    },
-    ...mensajes.slice(-8)
-  ];
-
-  // const response = await axios.post(
-  //   OLLAMA_URL,
-  //   {
-  //     model: MODEL,
-  //     messages: mensajesRecientes,
-  //     stream: false,
-  //     options: {
-  //       temperature: 0.2
-  //     }
-  //   }
-  // );
-  // return response.data.message.content;
-  return await llamarIA({messages: mensajesRecientes})
+  return llamarIA({
+    messages: [
+      {
+        role: "system",
+        content: "Eres un asistente experto en programación, revisión y refactorización de código.",
+      },
+      ...historial,
+    ],
+  });
 }
 
-// Genera un prompt que analiza responsabilidades, duplicación, problemas de arquitectura y sugerencias
-//Llama a la IA y guarda resultados por grupo
 export async function analizarProyecto({ archivos }) {
-
-  const grupos = agruparArchivos(archivos, 3);
-
+  const grupos = agruparArchivos(archivos);
   const resultados = [];
 
   for (const grupo of grupos) {
-
-    const contenidoGrupo = grupo.map(a =>
-      `Archivo: ${a.nombre}\n${a.contenido}`
-    ).join("\n\n");
+    const contenidoGrupo = grupo
+      .map((a) => `Archivo: ${a.nombre}\n${a.contenido}`)
+      .join("\n\n");
 
     const prompt = `
-      Eres un ingeniero de software experto.
+Eres un ingeniero de software experto.
 
-      Analiza los siguientes archivos en conjunto:
+Analiza los siguientes archivos en conjunto:
 
-      ${contenidoGrupo}
+${contenidoGrupo}
 
-      Devuelve:
+Devuelve:
 
-      1. Responsabilidades de cada archivo
-      2. Posible duplicación entre archivos
-      3. Problemas de arquitectura
-      4. Sugerencias de refactorización
-      `;
+1. Responsabilidades de cada archivo
+2. Posible duplicación entre archivos
+3. Problemas de arquitectura
+4. Sugerencias de refactorización
+`;
 
-    // const response = await axios.post(
-    //   OLLAMA_URL,
-    //   {
-    //     model: MODEL,
-    //     messages: [
-    //       {
-    //         role: "user",
-    //         content: prompt
-    //       }
-    //     ],
-    //     stream: false
-    //   }
-    // );
-    // resultados.push({
-    //   grupo: grupo.map(a => a.nombre),
-    //   resultado: response.data.message.content
-    // });
-
-    const resultado = await llamarIA({prompt});
     resultados.push({
-      grupo: grupo.map(a => a.nombre),
-      resultado
-    })
+      grupo: grupo.map((a) => a.nombre),
+      resultado: await llamarIA({ prompt }),
+    });
   }
 
   return resultados;
-
 }
 
-//Recibe análisis de archivos y estructura del proyecto, generando un reporte profesional de calida de software
-// export async function resumirProyecto(analisisArchivos, estructura, mejora) {
-
-//   const prompt = `
-//     Eres un arquitecto de software.
-
-//     Estructura del proyecto:
-//     ${estructura.join("\n")}
-
-//     Estos son análisis individuales de archivos:
-//     ${analisisArchivos.join("\n\n")}
-
-//     Genera un REPORTE PROFESIONAL DE CALIDAD DEL SOFTWARE.
-
-//     # REPORTE DE CALIDAD DEL SOFTWARE
-
-//     ## Problemas detectados
-
-//     IMPORTANTE:
-//     Debes usar EXACTAMENTE el siguiente formato, sin cambiar nada:
-
-//     ### Arquitectura
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Duplicación de Código
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Complejidad
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Organización
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Buenas prácticas
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     REGLAS:
-//     - NO cambies los títulos.
-//     - No cambiar el orden.
-//     - NO agregues nuevas categorías.
-//     - La palabra "SEVERIDAD" debe estar en mayúsculas.
-//     - No omitir la severidad en ninguna sección.
-//     - SI no hay problema, escribe: SEVERIDAD: Baja.
-//     - No agregar texto antes de "SEVERIDAD".
-//     - RESPETA exactamente el formato.
-
-//     ## Evaluación global del proyecto
-
-//     Calidad general: (elige SOLO UNA: Baja, Media o Alta)
-//     Mantenibilidad: (elige SOLO UNA: Baja, Media o Alta)
-//     Escalabilidad: (elige SOLO UNA: Baja, Media o Alta)
-
-//     ## Métricas de mejora calculadas automáticamente
-
-//     Arquitectura: ${mejora.arquitectura}%
-//     Duplicación de código: ${mejora.duplicacion}%
-//     Complejidad: ${mejora.complejidad}%
-//     Organización: ${mejora.organizacion}%
-//     Buenas prácticas: ${mejora.buenasPracticas}%
-//     Mejora promedio: ${mejora.promedio.toFixed(2)}%
-    
-
-//     ## Impacto de la refactorización
-//     Explica si la mejora es:
-//       - Significativa
-//       - Moderada
-//       - Baja
-
-//     ## Recomendaciones prioritarias
-
-//     ## Si tiene alguna duda puede preguntarme en la sección CHAT CON IA.
-    
-//     `;
-
-
-//   // const response = await axios.post(
-//   //   OLLAMA_URL,
-//   //   {
-//   //     model: MODEL,
-//   //     messages: [
-//   //       {
-//   //         role: "user",
-//   //         content: prompt
-//   //       }
-//   //     ],
-//   //     stream: false
-//   //   }
-//   // );
-//   // return response.data.message.content;
-
-//   return await llamarIA({prompt});
-// }
-// export async function resumirProyecto(analisisArchivos, estructura, mejora) {
-
-//   // Reduccion de contexto ya que la capacidad de la IA no lo soporta
-//   const analisisReducido = analisisArchivos
-//     .slice(0, 5) // máximo 5 archivos
-//     .map(a => a.slice(0, 1500)); // recorte por archivo
-
-//   const estructuraReducida = estructura.slice(0, 10);
-
-//   const prompt = `
-//     Eres un arquitecto de software.
-
-//     Estructura del proyecto:
-//     ${estructuraReducida.join("\n")}
-
-//     Estos son análisis individuales de archivos:
-//     ${analisisReducido.join("\n\n")}
-
-//     Genera un REPORTE PROFESIONAL DE CALIDAD DEL SOFTWARE.
-
-//     # REPORTE DE CALIDAD DEL SOFTWARE
-
-//     ## Problemas detectados
-
-//     IMPORTANTE:
-//     Usa el siguiente formato como guía e intenta respetarlo lo mejor posible:
-
-//     ### Arquitectura
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Duplicación de Código
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Complejidad
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Organización
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     ### Buenas prácticas
-//     SEVERIDAD: Baja | Media | Alta | Crítica
-//     ARCHIVOS AFECTADOS:
-//     DESCRIPCIÓN:
-//     RECOMENDACIÓN DE SOLUCIÓN:
-
-//     REGLAS:
-//     - No cambies los títulos
-//     - Mantén el orden
-//     - No agregues nuevas categorías
-//     - Usa "SEVERIDAD" en mayúsculas
-//     - Si no hay problema: SEVERIDAD: Baja
-//     - Mantén el formato lo más fiel posible
-
-//     ## Evaluación global del proyecto
-
-//     Calidad general: (Baja, Media o Alta)
-//     Mantenibilidad: (Baja, Media o Alta)
-//     Escalabilidad: (Baja, Media o Alta)
-
-//     ## Métricas de mejora
-
-//     Arquitectura: ${mejora.arquitectura}%
-//     Duplicación de código: ${mejora.duplicacion}%
-//     Complejidad: ${mejora.complejidad}%
-//     Organización: ${mejora.organizacion}%
-//     Buenas prácticas: ${mejora.buenasPracticas}%
-//     Mejora promedio: ${mejora.promedio.toFixed(2)}%
-
-//     ## Impacto de la refactorización
-//     (Significativa, Moderada o Baja)
-
-//     ## Recomendaciones prioritarias
-//   `;
-
-//   return await llamarIA({ prompt });
-// }
 export async function resumirProyecto(analisisArchivos, estructura) {
-
-  // Reducción de contexto
-  const analisisReducido = analisisArchivos
-    .slice(0, 5)
-    .map(a => a.slice(0, 1500));
-
+  // Reducción de contexto: el modelo local no soporta prompts muy largos.
+  const analisisReducido = analisisArchivos.slice(0, 5).map((a) => a.slice(0, 1500));
   const estructuraReducida = estructura.slice(0, 10);
 
   const prompt = `
@@ -438,152 +204,175 @@ Buenas prácticas: X%
 ## Recomendaciones prioritarias
 `;
 
-  return await llamarIA({ prompt });
+  return llamarIA({ prompt });
 }
 
-// export async function resumirProyecto(analisisArchivos, estructura) {
+function promptRefactor({ nombre, contenido }) {
+  return `
+Eres un ingeniero de software experto.
 
-//     const prompt = `
-//     Eres un arquitecto de software.
+Refactoriza el siguiente archivo manteniendo EXACTAMENTE la misma funcionalidad.
 
-//     Estructura del proyecto:
-//     ${estructura.join("\n")}
+Ruta del archivo:
+${nombre}
 
-//     Estos son análisis individuales de archivos:
-//     ${analisisArchivos.join("\n\n")}
+Código original:
+${contenido}
 
-//     Genera un REPORTE PROFESIONAL DE CALIDAD DEL SOFTWARE.
+REGLAS CRÍTICAS (OBLIGATORIAS):
 
-//     # REPORTE DE CALIDAD DEL SOFTWARE
+- NO cambiar endpoints
+- NO cambiar método HTTP (POST, GET, etc.)
+- NO cambiar estructura de fetch
+- NO cambiar nombres de variables existentes
+- NO cambiar la forma en que se envían datos al backend
+- NO cambiar la forma en que se recibe la respuesta
 
-//     ## Problemas detectados
+Si haces alguno de estos cambios, la respuesta es incorrecta.
 
-//     Organiza los problemas usando EXACTAMENTE estas secciones:
+Solo puedes:
+- mejorar formato
+- mejorar legibilidad
+- reducir duplicación
+- agregar comentarios
 
-//     ### Arquitectura
-//     ### Duplicación de Código
-//     ### Complejidad
-//     ### Organización
-//     ### Buenas prácticas
+IMPORTANTE:
+Devuelve el archivo COMPLETO, desde la primera hasta la última línea.
+Si no hay mejoras claras, devuelve el código casi igual.
 
-//     Para cada sección incluye:
+Agrega comentarios SOLO donde hagas cambios usando:
 
-//     SEVERIDAD: Baja | Media | Alta | Crítica  
-//     ARCHIVOS AFECTADOS  
-//     DESCRIPCIÓN  
-//     RECOMENDACIÓN DE SOLUCIÓN  
+// CAMBIO IA:
+// explicación breve
 
-//     IMPORTANTE:
-//     - No cambies los nombres de las secciones
-//     - No agregues nuevas categorías
-//     - No uses el formato "TIPO"
+Devuelve SOLO el código, sin bloques markdown.
+`;
+}
 
-//     ## Evaluación global del proyecto
+// Estados posibles de un archivo tras pasar por el modelo.
+export const ESTADO = {
+  REFACTORIZADO: "refactorizado",
+  OMITIDO_POR_TAMANIO: "omitido_por_tamanio",
+  REPARADO_SINTAXIS: "reparado_tras_error_de_sintaxis",
+  REPARADO_CONTRATO: "reparado_tras_romper_el_contrato",
+  REVERTIDO_SINTAXIS: "revertido_por_sintaxis_invalida",
+  REVERTIDO_CONTRATO: "revertido_por_contrato_roto",
+};
 
-//     Calidad general:
-//     Mantenibilidad:
-//     Escalabilidad:
+// Dos verificaciones en cascada, de la más barata a la más cara de arreglar:
+// primero que compile, después que siga exponiendo lo mismo.
+async function verificar(nombre, original, generado) {
+  if (config.analisis.validarSintaxis) {
+    const sintaxis = await validarSintaxis(nombre, generado);
 
-//     ## Recomendaciones prioritarias
+    if (!sintaxis.valido) return { valido: false, tipo: "sintaxis", motivo: sintaxis.motivo };
+  }
 
-//     Finalmente, invita al usuario a hacer preguntas en el chat si tiene dudas.
-//     `;
+  if (config.analisis.validarContrato) {
+    const contrato = validarContrato(original, generado);
 
-//   const response = await axios.post(
-//     OLLAMA_URL,
-//     {
-//       model: MODEL,
-//       messages: [
-//         {
-//           role: "user",
-//           content: prompt
-//         }
-//       ],
-//       stream: false
-//     }
-//   );
+    if (!contrato.valido) return { valido: false, tipo: "contrato", motivo: contrato.motivo, ...contrato };
+  }
 
-//   return response.data.message.content;
-// }
+  return { valido: true };
+}
 
-//Refactoriza cada archivo individual con apoyo de la IA, devolviendolo respetando la funcionalidad original 
+function promptReparacion(codigo, revision) {
+  if (revision.tipo === "sintaxis") {
+    return `
+El siguiente código JavaScript tiene un error de sintaxis:
+
+${codigo}
+
+Error del intérprete:
+${revision.motivo}
+
+Corrige ÚNICAMENTE el error de sintaxis, sin cambiar la lógica.
+Devuelve el archivo COMPLETO y SOLO el código, sin bloques markdown.
+`;
+  }
+
+  return `
+El siguiente código JavaScript compila, pero ROMPE el contrato público del
+módulo: has eliminado o renombrado cosas que otros archivos necesitan.
+
+${codigo}
+
+Problema detectado:
+${revision.motivo}
+
+Restaura EXACTAMENTE los nombres y rutas originales que se perdieron, sin
+deshacer las demás mejoras de formato y legibilidad.
+Devuelve el archivo COMPLETO y SOLO el código, sin bloques markdown.
+`;
+}
+
 export async function refactorizarArchivo({ nombre, contenido }) {
+  const generado = limpiarBloqueDeCodigo(await llamarIA({ prompt: promptRefactor({ nombre, contenido }) }));
 
-  const prompt = `
-    Eres un ingeniero de software experto.
+  const primeraRevision = await verificar(nombre, contenido, generado);
 
-    Refactoriza el siguiente archivo manteniendo EXACTAMENTE la misma funcionalidad.
+  if (primeraRevision.valido) {
+    return { archivo: nombre, codigo: generado, estado: ESTADO.REFACTORIZADO };
+  }
 
-    Ruta del archivo:
-    ${nombre}
+  // Auto-reparación: al modelo se le devuelve el fallo exacto. Un modelo
+  // pequeño suele corregir errores mecánicos si se le señala dónde están.
+  console.log(`Fallo de ${primeraRevision.tipo} en ${nombre}, solicitando corrección...`);
 
-    Código original:
-    ${contenido}
+  const reparado = limpiarBloqueDeCodigo(
+    await llamarIA({ prompt: promptReparacion(generado, primeraRevision) })
+  );
 
-    REGLAS CRÍTICAS (OBLIGATORIAS):
+  // El reintento se revisa entero: al arreglar la sintaxis pudo romper el
+  // contrato, y viceversa.
+  const segundaRevision = await verificar(nombre, contenido, reparado);
 
-    - NO cambiar endpoints
-    - NO cambiar método HTTP (POST, GET, etc.)
-    - NO cambiar estructura de fetch
-    - NO cambiar nombres de variables existentes
-    - NO cambiar la forma en que se envían datos al backend
-    - NO cambiar la forma en que se recibe la respuesta
+  if (segundaRevision.valido) {
+    return {
+      archivo: nombre,
+      codigo: reparado,
+      estado:
+        primeraRevision.tipo === "sintaxis" ? ESTADO.REPARADO_SINTAXIS : ESTADO.REPARADO_CONTRATO,
+    };
+  }
 
-    Si haces alguno de estos cambios, la respuesta es incorrecta.
+  // El modelo no fue capaz de producir un refactor utilizable: se conserva el
+  // original. Entregar código roto es peor que no refactorizar nada.
+  console.log(`Revirtiendo ${nombre}: ${segundaRevision.motivo}`);
 
-    Solo puedes:
-    - mejorar formato
-    - mejorar legibilidad
-    - reducir duplicación
-    - agregar comentarios
-
-    IMPORTANTE:
-    Si no hay mejoras claras, devuelve el código casi igual.
-
-    Agrega comentarios SOLO donde hagas cambios usando:
-
-    // CAMBIO IA:
-    // explicación breve
-
-    Devuelve SOLO el código.
-    `;
-
-      // const response = await axios.post(
-      //   OLLAMA_URL,
-      //   {
-      //     model: MODEL,
-      //     messages: [
-      //       {
-      //         role: "user",
-      //         content: prompt
-      //       }
-      //     ],
-      //     stream: false
-      //   }
-      // );
-
-      const codigo = await llamarIA({prompt})
-      return {
-        archivo: nombre,
-        codigo
-      };
+  return {
+    archivo: nombre,
+    codigo: contenido,
+    estado:
+      segundaRevision.tipo === "sintaxis" ? ESTADO.REVERTIDO_SINTAXIS : ESTADO.REVERTIDO_CONTRATO,
+    error: segundaRevision.motivo,
+  };
 }
 
-//Llama a refactorizarArchivo y retorna todos los archivos refactorizados
 export async function refactorizarProyecto(archivos) {
-
   const resultados = [];
 
   for (const archivo of archivos) {
+    // Truncar el contenido produciría archivos cortados a la mitad en el ZIP.
+    // Ante un archivo demasiado grande preferimos devolverlo intacto.
+    if (archivo.contenido.length > config.analisis.maxCaracteresRefactor) {
+      console.log(`Omitiendo (demasiado grande): ${archivo.nombre}`);
+
+      resultados.push({
+        archivo: archivo.nombre,
+        codigo: archivo.contenido,
+        estado: ESTADO.OMITIDO_POR_TAMANIO,
+      });
+
+      continue;
+    }
 
     console.log("Refactorizando:", archivo.nombre);
 
-    const resultado = await refactorizarArchivo({
-      nombre: archivo.nombre,
-      contenido: archivo.contenido.slice(0, 3000)
-    });
-
-    resultados.push(resultado);
+    resultados.push(
+      await refactorizarArchivo({ nombre: archivo.nombre, contenido: archivo.contenido })
+    );
   }
 
   return resultados;

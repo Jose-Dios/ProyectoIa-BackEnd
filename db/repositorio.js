@@ -1,20 +1,27 @@
-//Se realiza la conexion a la BD 
+import { crearRepositorioMongo } from "./repositorioMongo.js";
+import { crearRepositorioMemoria } from "./repositorioMemoria.js";
+import { config } from "../config/env.js";
 
-import { MongoClient } from "mongodb";
-import "dotenv/config";
+let repositorio = null;
 
-const url = process.env.BD_LINK;
-const client = new MongoClient(url);
-
-let dbInstance = null; //evitar multiples conexiones
-
+// El backend de persistencia se elige con BD_MODO. Ambas implementaciones
+// exponen la misma interfaz, así que los controladores no saben cuál usan.
 export async function conectarDB() {
+  if (repositorio) return repositorio;
 
-  if (dbInstance) return dbInstance;
+  if (config.bd.modo === "memoria") {
+    console.log("Persistencia EN MEMORIA: los datos se pierden al reiniciar.");
+    repositorio = crearRepositorioMemoria();
+  } else {
+    repositorio = await crearRepositorioMongo(config.bd.link);
+  }
 
-  await client.connect();
-  console.log("Conectado a MongoDB");
+  return repositorio;
+}
 
-  dbInstance = client.db();
-  return dbInstance;
+export async function cerrarDB() {
+  if (!repositorio) return;
+
+  await repositorio.cerrar();
+  repositorio = null;
 }

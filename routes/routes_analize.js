@@ -6,23 +6,33 @@ import {
   historial,
   analizarProyectoIA,
   obtenerConversacion,
-  eliminarConversacion
+  eliminarConversacion,
 } from "../controllers/controllerIA.js";
+import { asyncHandler } from "../utils/errores.js";
+import { config } from "../config/env.js";
 
-
-export default function crearRouterAnalisis(db) {
-
+export default function crearRouterAnalisis(repo) {
   const router = express.Router();
 
-  const upload = multer({ storage: multer.memoryStorage() });
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    // Sin límites, una subida grande agota la memoria del proceso.
+    limits: {
+      fileSize: config.analisis.maxBytesPorArchivo,
+      files: 500,
+    },
+  });
 
-  //Actua como capa intermedia entre la peticion HTTP y los controladores, pasando req, res y db a los controladores
-  router.post("/analizar", (req,res)=>analizar(req,res,db));
-  router.post("/chat", (req,res)=>chat(req,res,db));
-  router.get("/historial", (req,res)=>historial(req,res,db));
-  router.post("/analizar-proyecto",upload.array("archivos"), (req, res) => analizarProyectoIA(req, res, db));
-  router.get("/historial/:id",(req,res)=>obtenerConversacion(req,res,db));
-  router.delete("/eliminar/:id",(req,res)=>eliminarConversacion(req,res,db));
-  
+  // Capa intermedia entre la petición HTTP y los controladores: inyecta el
+  // repositorio y encamina cualquier error al middleware central de errores.
+  const conRepo = (controlador) => asyncHandler((req, res) => controlador(req, res, repo));
+
+  router.post("/analizar", conRepo(analizar));
+  router.post("/chat", conRepo(chat));
+  router.get("/historial", conRepo(historial));
+  router.post("/analizar-proyecto", upload.array("archivos"), conRepo(analizarProyectoIA));
+  router.get("/historial/:id", conRepo(obtenerConversacion));
+  router.delete("/eliminar/:id", conRepo(eliminarConversacion));
+
   return router;
 }

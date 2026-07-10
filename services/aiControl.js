@@ -1,53 +1,95 @@
 import axios from "axios";
-import "dotenv/config";
+import { config } from "../config/env.js";
 
-let contadorIA = 0;
-const LIMITE = 6;
-const MODEL = process.env.MODELO;
-const OLLAMA_URL = process.env.OLLAMA;
-const DETENER = process.env.PAUSA;
+const { url, urlPausa, modelo, timeoutMs, llamadasAntesDeReiniciar, opciones } = config.ollama;
 
+let contadorLlamadas = 0;
+
+// Un modelo local sirve una petición a la vez: lanzarlas en paralelo solo
+// provoca contención de memoria. Encadenamos las llamadas en una cola para
+// que dos peticiones HTTP simultáneas no compitan por la GPU ni corrompan
+// el contador de reinicios.
+let cola = Promise.resolve();
+
+function encolar(tarea) {
+  const resultado = cola.then(tarea, tarea);
+
+  // La cola avanza aunque la tarea falle; el error se propaga al llamador.
+  cola = resultado.then(
+    () => undefined,
+    () => undefined
+  );
+
+  return resultado;
+}
+
+// Descarga el modelo de memoria (keep_alive: 0) para evitar la degradación
+// de respuestas que Ollama muestra tras varias generaciones seguidas.
 async function reiniciarModelo() {
   try {
-    console.log("Reiniciando modelo...");
+    console.log("Descargando modelo de memoria para liberar recursos...");
 
-    await fetch(DETENER, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: MODEL })
-    });
+    await axios.post(
+      urlPausa,
+      { model: modelo, messages: [], keep_alive: 0 },
+      { timeout: timeoutMs }
+    );
 
-    // dejar respirar al sistema
-    await new Promise(r => setTimeout(r, 1500));
-
-  } catch (err) {
-    console.error("Error reiniciando modelo:", err);
+    await new Promise((resolver) => setTimeout(resolver, 1500));
+  } catch (error) {
+    // No es fatal: la siguiente generación volverá a cargar el modelo.
+    console.error("No se pudo reiniciar el modelo:", error.message);
   }
 }
 
-export async function llamarIA({ prompt, messages }) {
-
-  if (contadorIA >= LIMITE) {
+async function ejecutarLlamada(messages) {
+  if (contadorLlamadas >= llamadasAntesDeReiniciar) {
     await reiniciarModelo();
-    contadorIA = 0;
+    contadorLlamadas = 0;
   }
 
-  contadorIA++;
+  contadorLlamadas++;
 
-  const payload = {
-    model: MODEL,
-    stream: false
-  };
+  let respuesta;
 
-  if (messages) {
-    payload.messages = messages;
-  } else {
-    payload.messages = [
-      { role: "user", content: prompt }
-    ];
+  try {
+    respuesta = await axios.post(
+      url,
+      { model: modelo, messages, stream: false, options: opciones },
+      { timeout: timeoutMs }
+    );
+  } catch (error) {
+    if (error.code === "ECONNREFUSED") {
+      // Ollama escucha solo en IPv4; Node resuelve "localhost" primero a ::1.
+      const pista = url.includes("localhost") ? ' Prueba a usar "127.0.0.1" en lugar de "localhost".' : "";
+
+      throw new Error(
+        `No se pudo conectar con Ollama en ${url}. ¿Está corriendo 'ollama serve'?${pista}`
+      );
+    }
+
+    if (error.code === "ECONNABORTED") {
+      throw new Error(`Ollama superó el tiempo límite de ${timeoutMs} ms.`);
+    }
+
+    throw new Error(`Error al llamar a Ollama: ${error.message}`);
   }
 
-  const response = await axios.post(OLLAMA_URL, payload);
+  const contenido = respuesta.data?.message?.content;
 
-  return response.data.message.content;
+  if (typeof contenido !== "string") {
+    throw new Error("Ollama devolvió una respuesta con un formato inesperado.");
+  }
+
+  return contenido;
+}
+
+export function llamarIA({ prompt, messages }) {
+  if (!messages && !prompt) {
+    throw new Error("llamarIA requiere 'prompt' o 'messages'.");
+  }
+
+  const conversacion = messages ?? [{ role: "user", content: prompt }];
+
+  return encolar(() => ejecutarLlamada(conversacion));
 }

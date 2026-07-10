@@ -1,515 +1,336 @@
-import { ObjectId } from "mongodb";
-import { analizarCodigo, chatGeneral, analizarProyecto, resumirProyecto, refactorizarProyecto} from "../services/aiService.js";
-// Esta importacion se quito porque ya no se trabaja con direcciones, se cambio a recibir archivos
-// import { leerProyecto } from "../utils/leer_proyecto.js";
-import { guardarArchivosRefactorizados, crearZip, limpiarCarpetaTemporal, crearReporteCambios} from "../utils/crearZip.js";
+import {
+  analizarCodigo,
+  chatGeneral,
+  analizarProyecto,
+  resumirProyecto,
+  refactorizarProyecto,
+  ESTADO,
+} from "../services/aiService.js";
+import { calcularMetricasCodigo, compararMetricas } from "../utils/metricasCodigo.js";
+import {
+  crearEspacioTrabajo,
+  guardarArchivosRefactorizados,
+  crearReporteCambios,
+  crearReporteArquitectura,
+  crearZip,
+  limpiarEspacioTrabajo,
+} from "../utils/crearZip.js";
 import { prioridadArchivo } from "../utils/prioridadArchivo.js";
 import { eliminarDuplicados } from "../utils/detectarDuplicados.js";
-import { extraerMetricas,validarFormato, normalizarResumen, interpretarMejora, extraerMetricasFinales, normalizarMetricas, calcularMejora, iniciarCronometro, finalizarCronometro } from "../utils/metricas.js"
+import {
+  validarFormato,
+  normalizarResumen,
+  interpretarMejora,
+  extraerMetricasFinales,
+  iniciarCronometro,
+  finalizarCronometro,
+} from "../utils/metricas.js";
+import { errorPeticion, errorNoEncontrado } from "../utils/errores.js";
+import { config } from "../config/env.js";
 
-//Recibe código desde req.body y guarda la conversación en MongoDB
-export async function analizar(req,res,db) {
-    try {
-            //Inicia cronometro
-          const inicio = iniciarCronometro();
-    
-          const { codigo, lenguaje } = req.body;
-    
-          if (!codigo) {
-            return res.status(400).json({ error: "Falta el código" });
-          }
-    
-          const resultado = await analizarCodigo({
-            codigo,
-            lenguaje: lenguaje || "desconocido"
-          });
+const CARPETAS_IGNORADAS = ["node_modules", ".git", "dist", "build", "coverage"];
 
-          const tiempo = finalizarCronometro(inicio);
+const RESUMEN_POR_DEFECTO = `# REPORTE DE CALIDAD DEL SOFTWARE
 
-          const tiempoAnalisis =  `${tiempo.segundos} segundos`;
-    
-          const conversaciones = db.collection("conversaciones");
-    
-          const nueva = await conversaciones.insertOne({
-            tipo: "analisis_codigo",
-            lenguaje,
-            codigo,
-            fecha: new Date(),
-            mensajes: [
-              { role: "user", content: "Analiza este código:\n" + codigo },
-              { role: "assistant", content: resultado }
-            ],
-            eliminado: false,
-            fechaEliminado: null 
-          });
-    
-          res.json({
-            resultado,
-            conversacionId: nueva.insertedId
-          });
-    
-        } catch (error) {
-            console.error(error);
+## Problemas detectados
 
-            res.status(500).json({
-                error: "Error interno del servidor"
-            });
-        }
+### Arquitectura
+SEVERIDAD: Baja
+
+### Duplicación de Código
+SEVERIDAD: Baja
+
+### Complejidad
+SEVERIDAD: Baja
+
+### Organización
+SEVERIDAD: Baja
+
+### Buenas prácticas
+SEVERIDAD: Baja
+
+## Métricas de calidad del software
+
+No fue posible analizar el proyecto con el formato esperado.
+
+Arquitectura: 0%
+Duplicación de código: 0%
+Complejidad: 0%
+Organización: 0%
+Buenas prácticas: 0%
+`;
+
+// Cada controlador recibe `repo`: la implementación concreta (MongoDB o
+// memoria) se decide en el arranque según BD_MODO.
+function validarId(repo, id, campo = "id") {
+  if (!repo.esIdValido(id)) {
+    throw errorPeticion(`El ${campo} proporcionado no es válido`);
+  }
+
+  return id;
 }
 
-//Recibe el mensaje con un identificador ID, recupera la conversacion de la BD y actualiza conversación en DB y devuelve respuesta.
-export async function chat(req,res,db) {
-    try {
-    
-          const { mensaje, conversacionId } = req.body;
-    
-          if (!mensaje || mensaje.trim() === "") {
-            return res.status(400).json({ error: "Mensaje vacío" });
-          }
-    
-          const conversaciones = db.collection("conversaciones");
-    
-          const conversacion = await conversaciones.findOne({
-            _id: new ObjectId(conversacionId),
-            eliminado: false
-          });
-    
-          if (!conversacion) {
-            return res.status(404).json({ error: "Conversación no encontrada" });
-          }
-    
-          conversacion.mensajes.push({
-            role: "user",
-            content: mensaje
-          });
-    
-          const respuesta = await chatGeneral({
-            mensajes: conversacion.mensajes
-          });
-    
-          conversacion.mensajes.push({
-            role: "assistant",
-            content: respuesta
-          });
-    
-          await conversaciones.updateOne(
-            { _id: conversacion._id },
-            { $set: { mensajes: conversacion.mensajes } }
-          );
-    
-          res.json({ respuesta });
-    
-        } catch (error) {
-            console.error(error);
+// Recibe código desde req.body y guarda la conversación.
+export async function analizar(req, res, repo) {
+  const inicio = iniciarCronometro();
 
-            res.status(500).json({
-                error: "Error interno del servidor"
-            });
-        }
+  const { codigo, lenguaje } = req.body ?? {};
+
+  if (typeof codigo !== "string" || codigo.trim() === "") {
+    throw errorPeticion("Falta el código");
+  }
+
+  const resultado = await analizarCodigo({
+    codigo,
+    lenguaje: lenguaje || "desconocido",
+  });
+
+  const { segundos } = finalizarCronometro(inicio);
+  const tiempoAnalisis = `${segundos} segundos`;
+
+  const conversacionId = await repo.crear({
+    tipo: "analisis_codigo",
+    lenguaje: lenguaje || "desconocido",
+    codigo,
+    fecha: new Date(),
+    tiempoAnalisis,
+    mensajes: [
+      { role: "user", content: `Analiza este código:\n${codigo}` },
+      { role: "assistant", content: resultado },
+    ],
+    eliminado: false,
+    fechaEliminado: null,
+  });
+
+  res.json({ resultado, tiempoAnalisis, conversacionId });
 }
 
-//Devuelve las últimas 20 conversaciones ordenadas por fecha
-export async function historial(req,res,db) {
-    try {
+// Recupera la conversación, añade el mensaje del usuario y la respuesta de la IA.
+export async function chat(req, res, repo) {
+  const { mensaje, conversacionId } = req.body ?? {};
 
-      const conversaciones = db.collection("conversaciones");
+  if (typeof mensaje !== "string" || mensaje.trim() === "") {
+    throw errorPeticion("Mensaje vacío");
+  }
 
-      const lista = await conversaciones
-        .find({ eliminado: false })
-        .sort({ fecha: -1 })
-        .limit(20)
-        .toArray();
+  validarId(repo, conversacionId, "conversacionId");
 
-      res.json(lista);
+  const conversacion = await repo.obtenerPorId(conversacionId);
 
-    } catch (error) {
-            console.error(error);
+  if (!conversacion) {
+    throw errorNoEncontrado("Conversación no encontrada");
+  }
 
-            res.status(500).json({
-                error: "Error interno del servidor"
-            });
-        }
+  const mensajeUsuario = { role: "user", content: mensaje };
+
+  const respuesta = await chatGeneral({
+    mensajes: [...conversacion.mensajes, mensajeUsuario],
+  });
+
+  // Se añaden ambos mensajes de golpe, sin reescribir el historial completo:
+  // así una petición concurrente sobre la misma conversación no pierde datos.
+  await repo.agregarMensajes(conversacionId, [
+    mensajeUsuario,
+    { role: "assistant", content: respuesta },
+  ]);
+
+  res.json({ respuesta });
 }
 
-//Se realiza el analisis incluyendo analizar pproyectos por grupos, resumir la respuesta y refactorizar cada archivo
-// export async function analizarProyectoIA(req, res, db) {
-//   try {
-//     const lenguaje = req.body.lenguaje;
+// Devuelve las últimas 20 conversaciones ordenadas por fecha.
+export async function historial(req, res, repo) {
+  res.json(await repo.listarRecientes(20));
+}
 
-//     // archivos desde multer
-//     let archivos = req.files.map(file => ({
-//       nombre: file.webkitRelativePath || file.originalname,
-//       contenido: file.buffer.toString("utf-8")
-//     }));
+function prepararArchivos(files, lenguaje) {
+  let archivos = files.map((file) => ({
+    nombre: file.originalname,
+    contenido: file.buffer.toString("utf-8"),
+  }));
 
-//     // filtrar carpetas basura
-//     archivos = archivos.filter(a =>
-//       !a.nombre.includes("node_modules") &&
-//       !a.nombre.includes(".git") &&
-//       !a.nombre.includes("dist") &&
-//       !a.nombre.includes("build") &&
-//       !a.nombre.includes("coverage")
-//     );
+  archivos = archivos.filter(
+    (a) => !CARPETAS_IGNORADAS.some((carpeta) => a.nombre.split(/[/\\]/).includes(carpeta))
+  );
 
-//     // filtrar por lenguaje
-//     if (lenguaje === "javascript" || lenguaje === "typescript") {
-//       archivos = archivos.filter(a =>
-//         a.nombre.endsWith(".js") || a.nombre.endsWith(".ts")
-//       );
-//     }
+  if (lenguaje === "javascript" || lenguaje === "typescript") {
+    archivos = archivos.filter((a) => a.nombre.endsWith(".js") || a.nombre.endsWith(".ts"));
+  }
 
-//     // limitar tamaño
-//     archivos = archivos.filter(a => a.contenido.length < 50000);
+  archivos = archivos.filter((a) => a.contenido.length < config.analisis.maxBytesPorArchivo);
+  archivos = eliminarDuplicados(archivos);
+  archivos.sort((a, b) => prioridadArchivo(b) - prioridadArchivo(a));
 
-//     // eliminar duplicados
-//     archivos = eliminarDuplicados(archivos);
+  return archivos.slice(0, config.analisis.maxArchivos);
+}
 
-//     // ordenar por prioridad
-//     archivos.sort((a, b) => prioridadArchivo(b) - prioridadArchivo(a));
+// Tasa de éxito del modelo: cuántos archivos salieron bien a la primera,
+// cuántos necesitaron reparación y cuántos hubo que revertir. Es el dato que
+// mide si un modelo pequeño es viable para esta tarea.
+//
+// Se separan los fallos de sintaxis (no compila) de los de contrato (compila
+// pero rompe a quien lo importa), porque son problemas distintos del modelo.
+function resumirValidacion(refactorizados) {
+  const conteo = (...estados) => refactorizados.filter((r) => estados.includes(r.estado)).length;
 
-//     // limitar cantidad
-//     if (archivos.length > 10) {
-//       archivos = archivos.slice(0, 10);
-//     }
+  const total = refactorizados.length;
+  const validos = conteo(ESTADO.REFACTORIZADO);
+  const reparados = conteo(ESTADO.REPARADO_SINTAXIS, ESTADO.REPARADO_CONTRATO);
 
-//     const analisisArchivos = await analizarProyecto({ archivos });
+  const revertidos = refactorizados.filter((r) =>
+    [ESTADO.REVERTIDO_SINTAXIS, ESTADO.REVERTIDO_CONTRATO].includes(r.estado)
+  );
 
-//     const totalArchivos = archivos.length;
+  return {
+    total,
+    validosPrimerIntento: validos,
+    reparadosTrasError: reparados,
+    reparadosPorSintaxis: conteo(ESTADO.REPARADO_SINTAXIS),
+    reparadosPorContrato: conteo(ESTADO.REPARADO_CONTRATO),
+    revertidos: revertidos.length,
+    revertidosPorSintaxis: conteo(ESTADO.REVERTIDO_SINTAXIS),
+    revertidosPorContrato: conteo(ESTADO.REVERTIDO_CONTRATO),
+    omitidosPorTamanio: conteo(ESTADO.OMITIDO_POR_TAMANIO),
+    tasaExito: total > 0 ? Number((((validos + reparados) / total) * 100).toFixed(2)) : 0,
+    archivosRevertidos: revertidos.map((r) => ({
+      archivo: r.archivo,
+      estado: r.estado,
+      error: r.error,
+    })),
+  };
+}
 
-//     // const metricasAntesraw = calcularMetricasIniciales(archivos);
-//     // const metricasAntes = normalizarMetricasIniciales(metricasAntesraw);
-//     const metricasAntesRaw = calcularMetricasIniciales(archivos);
-//     const metricasAntes = normalizarMetricas(metricasAntesRaw, totalArchivos);
+// Analiza el proyecto por grupos, resume, refactoriza y empaqueta el resultado.
+export async function analizarProyectoIA(req, res, repo) {
+  const inicio = iniciarCronometro();
 
-//     // SOLO REFACTORIZACIÓN (sin reanálisis)
-//     const refactorizados = await refactorizarProyecto(archivos);
+  const lenguaje = req.body?.lenguaje;
 
-    
-//     // const metricasDespuesRaw = extraerMetricas(analisisArchivos);
-//     // const metricasDespues = normalizarMetricasIA(metricasDespuesRaw, archivos.length);
-//     // const metricasDespuesRaw = extraerMetricas(analisisArchivos);
-//     // const metricasDespues = normalizarMetricas(metricasDespuesRaw, totalArchivos);
+  if (!Array.isArray(req.files) || req.files.length === 0) {
+    throw errorPeticion("No se recibió ningún archivo");
+  }
 
-//     // const mejora = calcularMejora(metricasAntes, metricasDespues);
-//     // const interpretacion = interpretarMejora(mejora);
+  const archivos = prepararArchivos(req.files, lenguaje);
 
-//     // extraer métricas desde la IA
-//     const metricas = extraerMetricasFinales(resumen);
+  if (archivos.length === 0) {
+    throw errorPeticion("Ningún archivo cumple los criterios de análisis (lenguaje o tamaño)");
+  }
 
-//     // interpretación basada en métricas de la IA
-//     const interpretacion = interpretarMejora(metricas);
+  const analisisArchivos = await analizarProyecto({ archivos });
 
-//     // resumen
-//     // const textos = analisisArchivos.map(a =>
-//     //   `Archivo: ${a.archivo}\nAnálisis:\n${a.resultado}`
-//     // );
-//     const textos = analisisArchivos.map(a =>
-//       `Grupo de archivos: ${a.grupo.join(", ")}\n${a.resultado}`
-//     );
+  const textos = analisisArchivos.map((a) => `Grupo de archivos: ${a.grupo.join(", ")}\n${a.resultado}`);
+  const estructura = archivos.map((a) => a.nombre);
 
-//     const estructura = archivos.map(a => a.nombre);
+  let resumen = normalizarResumen(await resumirProyecto(textos, estructura));
 
-//     // let resumen = await resumirProyecto(textos, estructura, mejora);
-//     let resumen = await resumirProyecto(textos, estructura, {});
+  if (!validarFormato(resumen)) {
+    console.log("Formato incorrecto, reintentando...");
+    resumen = normalizarResumen(await resumirProyecto(textos, estructura));
+  }
 
-//     // normalizar
-//     resumen = normalizarResumen(resumen);
+  if (!validarFormato(resumen)) {
+    console.log("Fallback activado: la IA no respetó el formato esperado");
+    resumen = RESUMEN_POR_DEFECTO;
+  }
 
-//     // retry
-//     if (!validarFormato(resumen)) {
-//       console.log("Formato incorrecto, reintentando...");
-//       resumen = await resumirProyecto(textos, estructura, {});
-//     }
+  // Evaluación de la IA sobre sí misma: útil como narrativa, pero no es una
+  // medición. Se guarda por separado de las métricas objetivas.
+  const metricas = extraerMetricasFinales(resumen);
+  const interpretacion = interpretarMejora(metricas);
 
-//     // fallback
-//     if (!validarFormato(resumen)) {
-//       console.log("Fallback activado");
+  const espacio = crearEspacioTrabajo();
 
-//       resumen = `
-// # REPORTE DE CALIDAD DEL SOFTWARE
+  let nombreZip;
+  let refactorizados;
 
-// ## Problemas detectados
-
-// ### Arquitectura
-// No se pudo analizar correctamente.
-
-// ### Duplicación de Código
-// No se pudo analizar correctamente.
-
-// ### Complejidad
-// No se pudo analizar correctamente.
-
-// ### Organización
-// No se pudo analizar correctamente.
-
-// ### Buenas prácticas
-// No se pudo analizar correctamente.
-//       `;
-//     }
-
-//     // ZIP
-//     const carpetaTemp = guardarArchivosRefactorizados(refactorizados);
-//     crearReporteCambios(analisisArchivos);
-//     const nombreZip = await crearZip(carpetaTemp);
-//     limpiarCarpetaTemporal();
-
-//     // BD
-//     const conversaciones = db.collection("conversaciones");
-
-//     const zip = `http://localhost:3000/refactorizado/${nombreZip}`;
-
-//     const nuevaConversacion = await conversaciones.insertOne({
-//       tipo: "analisis_proyecto",
-//       rutaProyecto: "subido_por_usuario",
-//       analisisArchivos,
-//       resumen,
-//       lenguaje,
-//       fecha: new Date(),
-//       mensajes: [
-//         {
-//           role: "system",
-//           content: "Eres un asistente experto en programación, arquitectura y refactorización de software."
-//         },
-//         {
-//           role: "user",
-//           content: `Analiza el proyecto subido por el usuario`
-//         },
-//         {
-//           role: "assistant",
-//           content: `
-// Resumen del análisis del proyecto:
-
-// ${resumen}
-
-// Mejora estimada:
-// - Arquitectura: ${mejora.arquitectura}%
-// - Duplicación: ${mejora.duplicacion}%
-// - Complejidad: ${mejora.complejidad}%
-// - Organización: ${mejora.organizacion}%
-// - Buenas prácticas: ${mejora.buenasPracticas}%
-// - Promedio: ${mejora.promedio.toFixed(2)}%
-
-// Interpretación:
-// ${interpretacion}
-
-// Archivos analizados: ${archivos.length}
-//           `
-//         }
-//       ],
-//       metricasAntes,
-//       metricasDespues,
-//       mejora,
-//       interpretacion,
-//       zip,
-//       eliminado: false,
-//       fechaEliminado: null
-//     });
-
-//     res.json({
-//       archivos: analisisArchivos,
-//       resumen,
-//       zip,
-//       metricasAntes,
-//       metricasDespues,
-//       mejora,
-//       interpretacion,
-//       conversacionId: nuevaConversacion.insertedId
-//     });
-
-//   } catch (error) {
-//     console.error(error);
-
-//     res.status(500).json({
-//       error: "Error interno del servidor"
-//     });
-//   }
-// }
-
-export async function analizarProyectoIA(req, res, db) {
   try {
-    //Inicia cronometro
-    const inicio = iniciarCronometro();
+    refactorizados = await refactorizarProyecto(archivos);
 
-    const lenguaje = req.body.lenguaje;
+    guardarArchivosRefactorizados(refactorizados, espacio);
+    crearReporteCambios(analisisArchivos, espacio);
+    crearReporteArquitectura(resumen, espacio);
 
-    let archivos = req.files.map(file => ({
-      nombre: file.webkitRelativePath || file.originalname,
-      contenido: file.buffer.toString("utf-8")
-    }));
-
-    // filtros
-    archivos = archivos.filter(a =>
-      !a.nombre.includes("node_modules") &&
-      !a.nombre.includes(".git") &&
-      !a.nombre.includes("dist") &&
-      !a.nombre.includes("build") &&
-      !a.nombre.includes("coverage")
-    );
-
-    if (lenguaje === "javascript" || lenguaje === "typescript") {
-      archivos = archivos.filter(a =>
-        a.nombre.endsWith(".js") || a.nombre.endsWith(".ts")
-      );
-    }
-
-    archivos = archivos.filter(a => a.contenido.length < 50000);
-
-    archivos = eliminarDuplicados(archivos);
-    archivos.sort((a, b) => prioridadArchivo(b) - prioridadArchivo(a));
-
-    if (archivos.length > 10) {
-      archivos = archivos.slice(0, 10);
-    }
-
-    
-    // ANÁLISIS IA
-    const analisisArchivos = await analizarProyecto({ archivos });
-
-    // TEXTOS PARA RESUMEN
-    const textos = analisisArchivos.map(a =>
-      `Grupo de archivos: ${a.grupo.join(", ")}\n${a.resultado}`
-    );
-
-    const estructura = archivos.map(a => a.nombre);
-
-    // RESUMEN IA
-    let resumen = await resumirProyecto(textos, estructura);
-
-    resumen = normalizarResumen(resumen);
-
-    // retry
-    if (!validarFormato(resumen)) {
-      console.log("Formato incorrecto, reintentando...");
-      resumen = await resumirProyecto(textos, estructura, {});
-      resumen = normalizarResumen(resumen);
-    }
-
-    // fallback
-    if (!validarFormato(resumen)) {
-      console.log("Fallback activado");
-
-      resumen = `
-        # REPORTE DE CALIDAD DEL SOFTWARE
-
-        ## Métricas de mejora
-        Arquitectura: 0%
-        Duplicación: 0%
-        Complejidad: 0%
-        Organización: 0%
-        Buenas prácticas: 0%
-              `;
-    }
-
-    // MÉTRICAS DESDE IA
-    const metricas = extraerMetricasFinales(resumen);
-
-    // INTERPRETACIÓN
-    const interpretacion = interpretarMejora(metricas);
-
-    // ZIP
-    const refactorizados = await refactorizarProyecto(archivos);
-    const carpetaTemp = guardarArchivosRefactorizados(refactorizados);
-    crearReporteCambios(analisisArchivos);
-    const nombreZip = await crearZip(carpetaTemp);
-    limpiarCarpetaTemporal();
-
-    const zip = `http://localhost:3000/refactorizado/${nombreZip}`;
-
-    // BD
-    const conversaciones = db.collection("conversaciones");
-
-    const tiempo = finalizarCronometro(inicio);
-
-    const tiempoAnalisis =  `${tiempo.segundos} segundos`;
-
-    const nuevaConversacion = await conversaciones.insertOne({
-      tipo: "analisis_proyecto",
-      resumen,
-      lenguaje,
-      fecha: new Date(),
-      metricas,
-      interpretacion,
-      tiempoAnalisis,
-      zip,
-      mensajes: [
-            { role: "user", content: "Analiza este archivo:\n"},
-            { role: "assistant", content: resumen }
-        ],
-      eliminado: false, 
-      fechaEliminado: null
-    });
-
-    // RESPUESTA
-    res.json({
-      archivos: analisisArchivos,
-      resumen,
-      metricas,
-      interpretacion,
-      zip,
-      tiempoAnalisis: `${tiempo.segundos} segundos`,
-      conversacionId: nuevaConversacion.insertedId
-    });
-
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: "Error interno del servidor"
-    });
+    nombreZip = await crearZip(espacio);
+  } finally {
+    // Se limpia también si el empaquetado falla, para no dejar basura en disco.
+    limpiarEspacioTrabajo(espacio);
   }
+
+  // Medición objetiva: mismas reglas aplicadas al código original y al
+  // refactorizado. Esto sí permite afirmar si hubo mejora.
+  const metricasAntes = calcularMetricasCodigo(archivos);
+  const metricasDespues = calcularMetricasCodigo(
+    refactorizados.map((r) => ({ nombre: r.archivo, contenido: r.codigo }))
+  );
+
+  const comparacion = compararMetricas(metricasAntes, metricasDespues);
+  const validacion = resumirValidacion(refactorizados);
+
+  const zip = `${config.urlPublica}/refactorizado/${nombreZip}`;
+
+  const { segundos } = finalizarCronometro(inicio);
+  const tiempoAnalisis = `${segundos} segundos`;
+
+  const documento = {
+    tipo: "analisis_proyecto",
+    resumen,
+    lenguaje,
+    fecha: new Date(),
+    // Autoevaluación del modelo (subjetiva).
+    metricas,
+    interpretacion,
+    // Medición determinista sobre el código (objetiva).
+    metricasAntes,
+    metricasDespues,
+    comparacion,
+    validacion,
+    modelo: config.ollama.modelo,
+    tiempoAnalisis,
+    zip,
+    mensajes: [
+      { role: "user", content: "Analiza el proyecto subido por el usuario" },
+      { role: "assistant", content: resumen },
+    ],
+    eliminado: false,
+    fechaEliminado: null,
+  };
+
+  const conversacionId = await repo.crear(documento);
+
+  res.json({
+    archivos: analisisArchivos,
+    resumen,
+    metricas,
+    interpretacion,
+    metricasAntes,
+    metricasDespues,
+    comparacion,
+    validacion,
+    modelo: config.ollama.modelo,
+    zip,
+    tiempoAnalisis,
+    conversacionId,
+  });
 }
 
-export async function obtenerConversacion(req,res,db) {
-    try {
-    
-          const conversaciones = db.collection("conversaciones");
-    
-          const conversacion = await conversaciones.findOne({
-            _id: new ObjectId(req.params.id),
-            eliminado: false
-          });
-    
-          res.json(conversacion);
-    
-        } catch (error) {
-            console.error(error);
+export async function obtenerConversacion(req, res, repo) {
+  validarId(repo, req.params.id);
 
-            res.status(500).json({
-                error: "Error interno del servidor"
-            });
-        }
+  const conversacion = await repo.obtenerPorId(req.params.id);
 
+  if (!conversacion) {
+    throw errorNoEncontrado("Conversación no encontrada");
+  }
+
+  res.json(conversacion);
 }
 
-//Esa funcion esta realizando un soft delete
-export async function eliminarConversacion(req,res,db) {
-  try{
-    const conversaciones = db.collection("conversaciones");
+// Borrado lógico: la conversación se marca como eliminada, no se destruye.
+export async function eliminarConversacion(req, res, repo) {
+  validarId(repo, req.params.id);
 
-    const id = req.params.id;
-
-    const resultado = await conversaciones.updateOne(
-      { _id: new ObjectId(id), eliminado: false },
-      { 
-        $set: { 
-          eliminado: true,
-          fechaEliminado: new Date()
-        } 
-      }
-    );
-
-    if (resultado.matchedCount === 0) {
-      return res.status(404).json({ error: "Conversación no encontrada o ya eliminada" });
-    }
-    
-    res.json({ mensaje: "Conversación eliminada correctamente" });
-
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: "Error interno del servidor"
-    });
+  if (!(await repo.marcarEliminada(req.params.id))) {
+    throw errorNoEncontrado("Conversación no encontrada o ya eliminada");
   }
-  
+
+  res.json({ mensaje: "Conversación eliminada correctamente" });
 }

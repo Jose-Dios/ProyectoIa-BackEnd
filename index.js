@@ -1,31 +1,15 @@
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import { conectarDB } from "./db/mongo.js";
-import crearRouterAnalisis from "./routes/routes_analize.js";
+// El arranque usa import dinámico a propósito: los `import` estáticos se
+// evalúan antes que cualquier try/catch, así que un fallo de configuración
+// (una variable de entorno ausente) escaparía como un stack trace ilegible.
+try {
+  const { iniciarServidor } = await import("./servidor.js");
 
-const app = express();
+  await iniciarServidor();
+} catch (error) {
+  // Sin configuración ni base de datos no hay nada que servir: es preferible
+  // morir a quedarse como un proceso vivo que responde 404 a todo.
+  console.error("\nNo se pudo iniciar el servidor:");
+  console.error(`  ${error.message}\n`);
 
-
-app.use(cors());
-app.use(express.json());
-app.use("/refactorizado", express.static("refactorizado"));
-
-const PORT = process.env.PORT;
-
-async function iniciarServidor() {
-  try {
-    const db = await conectarDB();
-
-    app.use("/api", crearRouterAnalisis(db));
-
-    app.listen(PORT, () => {
-      console.log(`Backend escuchando en http://localhost:${PORT}`);
-    });
-
-  } catch (error) {
-    console.error("Error al iniciar el servidor:", error);
-  }
+  process.exit(1);
 }
-
-iniciarServidor();

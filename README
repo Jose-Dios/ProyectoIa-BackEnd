@@ -1,182 +1,232 @@
 # 🚀 Proyecto IA - Análisis y Refactorización de Código
 
-Sistema backend que permite analizar proyectos de software utilizando un modelo de inteligencia artificial local mediante Ollama.
+Backend que analiza y refactoriza proyectos de software usando un modelo de
+lenguaje **local** (Ollama), sin enviar código a servicios externos.
+
+El sistema está pensado para trabajar con modelos pequeños (~3B parámetros),
+que caben en un equipo modesto pero **cometen errores con frecuencia**. Por eso
+el backend no confía en la salida del modelo: la verifica.
 
 ---
 
 ## Requisitos
 
-Antes de ejecutar el proyecto, asegúrate de tener instalado:
-
-* Node.js
-* Docker
+* Node.js **20.19 o superior** (lo exige el driver `mongodb@7`)
 * Ollama
+* Docker *(opcional: solo si usas MongoDB como persistencia)*
 
 ---
 
-## Configuración
-
-1. Clonar el repositorio:
-
-```bash
-git clone <URL_DEL_REPOSITORIO>
-cd proyecto_ia
-```
-
-2. Instalar dependencias:
+## Puesta en marcha
 
 ```bash
 npm install
-```
-
-3. Crear archivo `.env` basado en `.env.example`:
-
-```bash
 cp .env.example .env
 ```
 
----
-
-## Configuración de IA (Ollama)
-
-Iniciar el servidor de Ollama:
+Levanta el modelo:
 
 ```bash
 ollama serve
-```
-
-Descargar y ejecutar el modelo (si no lo tienes):
-
-```bash
 ollama run qwen2.5-coder:3b
 ```
 
-> Puedes cambiar el modelo en el archivo `.env` sin modificar el código.
-
----
-
-## Base de datos (MongoDB con Docker)
-
-Este proyecto utiliza MongoDB ejecutándose en contenedores Docker junto con una interfaz web para su gestión.
-
-### Levantar MongoDB + interfaz web
-
-Ejecuta:
-
-```bash
-docker-compose up -d
-```
-
----
-
-### Configuración recomendada (`docker-compose.yml`)
-
-Asegúrate de tener un archivo `docker-compose.yml` como este:
-
-```yaml
-version: '3.8'
-
-services:
-  mongo:
-    image: mongo:7
-    container_name: mongo_db
-    restart: always
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: admin123
-    volumes:
-      - mongo_data:/data/db
-
-  mongo-express:
-    image: mongo-express:1.0.0
-    container_name: mongo_express
-    restart: always
-    ports:
-      - "8081:8081"
-    environment:
-      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
-      ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
-      ME_CONFIG_MONGODB_SERVER: mongo
-
-volumes:
-  mongo_data:
-```
-
----
-
-### Acceso a la interfaz web
-
-Una vez levantados los contenedores, puedes acceder desde tu navegador a:
-
-```text
-http://localhost:8081
-```
-
----
-
-### Credenciales
-
-* Usuario: `admin`
-* Contraseña: `admin123`
-
----
-
-### Nota importante
-
-En tu archivo `.env`, la conexión a MongoDB debería verse así:
-
-```env
-MONGO_URI=mongodb://admin:admin123@localhost:27017/proyecto_ia?authSource=admin
-```
-
-Esto permite que tu backend se conecte correctamente usando autenticación.
-
-
----
-
-## Ejecución del proyecto
-
-Iniciar el servidor en modo desarrollo:
+Arranca el backend:
 
 ```bash
 npm run dev
 ```
 
-El backend estará disponible en:
+Disponible en `http://localhost:3000`. Comprueba el estado con:
 
+```bash
+curl http://localhost:3000/salud
 ```
-http://localhost:3000
-```
+
+> **Nota:** en `.env`, apunta a Ollama con `127.0.0.1` y **no** con `localhost`.
+> Ollama escucha únicamente en IPv4, mientras que Node resuelve `localhost`
+> primero a `::1` (IPv6): la conexión falla con `ECONNREFUSED` aunque `curl`
+> sí funcione, porque `curl` reintenta sobre IPv4 y Node no.
 
 ---
 
-## Características
+## Persistencia: MongoDB o memoria
 
-* Análisis de código fuente
-* Detección de duplicación
-* Sugerencias de refactorización
-* Uso de IA local (sin APIs externas)
-* Configuración dinámica mediante `.env`
-* Arquitectura modular (Controller / Service / Utils)
+La variable `BD_MODO` decide dónde se guardan las conversaciones. Ambas opciones
+implementan la misma interfaz, así que el resto del código no cambia.
 
----
+| `BD_MODO` | Requiere | Los datos... |
+|---|---|---|
+| `memoria` | nada | se pierden al reiniciar el servidor |
+| `mongo` | Docker + MongoDB | persisten |
 
-## Personalización
-
-Puedes cambiar fácilmente el modelo de IA modificando:
+**Modo memoria** (recomendado para desarrollo y demos):
 
 ```env
-MODEL=qwen2.5-coder:3b
+BD_MODO=memoria
 ```
 
-Esto permite usar otros modelos compatibles con Ollama sin cambiar el código fuente.
+**Modo MongoDB:**
+
+```env
+BD_MODO=mongo
+BD_LINK=mongodb://admin:admin123@localhost:27017/proyecto_ia?authSource=admin
+```
+
+```bash
+docker-compose up -d
+```
+
+La interfaz web de MongoDB queda en `http://localhost:8081` (usuario `admin`,
+contraseña `admin123`). **Cambia estas credenciales antes de exponer nada.**
 
 ---
 
-## Nota
+## Cómo se garantiza que el código refactorizado sirve
 
-El sistema está diseñado para funcionar completamente en local, sin depender de servicios externos, lo que permite mayor control, privacidad y reducción de costos.
+Un modelo de 3B parámetros devuelve código sintácticamente inválido con cierta
+frecuencia: cierra mal las llaves, corta la salida a mitad de función, inventa
+tokens. Entregar ese código al usuario haría inservible la herramienta.
+
+Cada archivo refactorizado pasa por **dos verificaciones en cascada**:
+
+1. **Sintáctica** — se valida con el parser de Node (`node --check`).
+2. **De contrato** — se comprueba que el archivo siga exportando los mismos
+   nombres y declarando las mismas rutas HTTP.
+
+Si alguna falla, se le devuelve al modelo el fallo exacto y se le pide que lo
+corrija. Si en el segundo intento sigue fallando, **se descarta la
+refactorización y se conserva el archivo original**.
+
+### Por qué no basta con que compile
+
+Observado con `mistral:7b` sobre este mismo proyecto: el modelo renombró
+`agregarUsuario` a `addUser` y exportó `module.exports = { addUser }`, pese a
+que el prompt prohíbe explícitamente cambiar nombres. **El archivo compila sin
+un solo error.** Pero cualquier `require("./usuarios").agregarUsuario` en el
+resto del proyecto acaba de romperse.
+
+`node --check` verifica sintaxis, no semántica. Por eso existe
+`services/validarContrato.js`, que extrae el contrato público del módulo (los
+nombres exportados en CommonJS y ESM, y los literales de ruta HTTP) antes y
+después, y revierte si desaparece alguno. Añadir exportaciones nuevas no rompe
+a nadie, así que no se penaliza.
+
+Es análisis léxico, no del AST: no detecta exportaciones dinámicas del tipo
+`module.exports[clave] = ...`.
+
+La respuesta de la API incluye un objeto `validacion` con la tasa de éxito, con
+los fallos de sintaxis separados de los de contrato porque son problemas
+distintos del modelo:
+
+```json
+{
+  "total": 10,
+  "validosPrimerIntento": 6,
+  "reparadosTrasError": 3,
+  "reparadosPorSintaxis": 1,
+  "reparadosPorContrato": 2,
+  "revertidos": 1,
+  "revertidosPorSintaxis": 0,
+  "revertidosPorContrato": 1,
+  "tasaExito": 90.0,
+  "archivosRevertidos": [
+    { "archivo": "src/api.js", "estado": "revertido_por_contrato_roto", "error": "exportaciones que desaparecieron: iniciar" }
+  ]
+}
+```
+
+Los archivos demasiado grandes (`MAX_CARACTERES_REFACTOR`) se omiten en lugar de
+truncarse: un archivo cortado a la mitad es peor que uno sin refactorizar.
 
 ---
+
+## Métricas: dos fuentes distintas
+
+El proyecto reporta métricas de **dos orígenes que no deben confundirse**:
+
+* **`metricas` / `interpretacion`** — Es la IA autoevaluándose en el reporte.
+  Sirve como narrativa legible, pero no es una medición: no es reproducible ni
+  verificable.
+
+* **`metricasAntes` / `metricasDespues` / `comparacion`** — Se calculan con
+  reglas deterministas sobre el código, antes y después de refactorizar:
+  líneas de código, complejidad ciclomática (McCabe), porcentaje de duplicación
+  (bloques de 5 líneas repetidos), densidad de comentarios y malas prácticas
+  (`var`, `==`, `console.log`).
+
+Solo las segundas permiten afirmar si hubo mejora. Son heurísticas léxicas, no
+análisis del AST: cuentan tokens sobre el texto, así que una palabra clave
+dentro de una cadena de texto puede contarse.
+
+---
+
+## Reproducibilidad
+
+Para que un experimento sea replicable, el modelo se invoca con temperatura baja
+y semilla fija (`TEMPERATURA`, `SEED` en `.env`). Con la misma entrada, el mismo
+modelo y la misma semilla, la salida se repite.
+
+El modelo usado queda registrado junto a cada análisis en el campo `modelo`.
+
+---
+
+## Endpoints
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/salud` | Estado, modelo y modo de persistencia |
+| `POST` | `/api/analizar` | Analiza un fragmento de código |
+| `POST` | `/api/chat` | Continúa una conversación |
+| `GET` | `/api/historial` | Últimas 20 conversaciones |
+| `GET` | `/api/historial/:id` | Detalle de una conversación |
+| `POST` | `/api/analizar-proyecto` | Sube archivos, analiza y devuelve un ZIP |
+| `DELETE` | `/api/eliminar/:id` | Borrado lógico |
+
+---
+
+## Pruebas
+
+```bash
+npm test
+```
+
+No requieren MongoDB ni Ollama: usan el modo memoria y validan el empaquetado
+ZIP, la detección de sintaxis inválida, las métricas y los códigos HTTP.
+
+---
+
+## Arquitectura
+
+```
+index.js              bootstrap (falla rápido si la config es inválida)
+servidor.js           Express, CORS, middleware central de errores
+config/env.js         validación de variables de entorno al arrancar
+routes/               enrutado e inyección del repositorio
+controllers/          orquestación del caso de uso
+services/
+  aiControl.js        único punto de contacto con Ollama (cola serializada)
+  aiService.js        prompts y ciclo de validación/reparación/reversión
+  validarCodigo.js    verificación sintáctica con node --check
+  validarContrato.js  verificación semántica: exportaciones y rutas HTTP
+db/
+  repositorio.js      selecciona la implementación según BD_MODO
+  repositorioMongo.js
+  repositorioMemoria.js
+utils/
+  metricasCodigo.js   métricas objetivas (antes/después)
+  metricas.js         parseo del reporte de la IA
+  crearZip.js         empaquetado por petición, con rutas saneadas
+```
+
+Las llamadas a Ollama se encolan: un modelo local sirve una petición a la vez, y
+lanzarlas en paralelo solo provoca contención de memoria.
+
+---
+
+## Nota de seguridad
+
+Los ZIP generados se sirven como archivos estáticos bajo `/refactorizado`. El
+nombre es un UUID no adivinable, pero **cualquiera con el enlace puede
+descargarlos**. Si el sistema se expone fuera de `localhost`, añade
+autenticación y restringe `CORS_ORIGENES`.
